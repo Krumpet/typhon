@@ -15,9 +15,7 @@ A repo for the typhon programming language
 * auto-boxing of elements into singleton arrays to match function signature
   
   ```
-  foo(validIntegers: integer[]) {
-   return this.numbers.any(num => validIntegers.contains(num));
-  }
-  
-  # foo can be called as foo(5) which will be implicitly invoked as foo([5])  
+  foo(validIntegers: integer[]):
+     return this.numbers.any(num => validIntegers.contains(num));    
+    # foo can be called as foo(5) which will be implicitly invoked as foo([5])  
   ```
