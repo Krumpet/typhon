@@ -34,7 +34,7 @@ A repo for the typhon programming language
       # rest of the class can use self.myParser etc.
   ```
 
-* Uniform Method Call Syntax as seen in Nim, D (possibly only if the first argument is named 'self' as in python classes
+* Uniform Method Call Syntax as seen in Nim, D (possibly only if the first argument is named 'self' as in python classes)
 
   ```
   # outside of a class
