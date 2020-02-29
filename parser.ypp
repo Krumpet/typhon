@@ -1,0 +1,358 @@
+%{
+
+#include "Processor.h"
+#include "bp.hpp"
+
+extern void output::printProductionRule(int yylineno);
+extern int yylex();
+int yyerror(char const* message);
+using namespace Nodes;
+
+int while_counter = 0;      // counts nested while scopes - if greater than 0, break/continue is legal.
+Processor proc = Processor();
+
+
+%}
+
+%nonassoc VOID INT BYTE B BOOL NUM ENUM TRUE FALSE RETURN WHILE BREAK CONTINUE SC ID STRING
+%left COMMA
+%right ASSIGN
+
+%left ENUMLIST
+%right FORMALLIST
+
+%left OR
+%left AND
+%left EQOP
+%nonassoc RELOP
+%left PLUSOP MINUSOP
+%left MULOP DIVOP
+%right LPAREN RPAREN
+%right NOT
+%left LBRACE RBRACE
+
+// TODO check if ok to put IF ELSE as highest precedence.
+
+%nonassoc IF
+%nonassoc ELSE
+
+
+%%
+
+/* Here define rules */
+Program: Enums Funcs {
+        output::printProductionRule(1);
+        proc.findMain();
+        proc.symbolTable.closeLastScope();
+    }
+
+Funcs: FuncDecl Funcs {
+        $$ = proc.addToFuncs($1, $2);
+    }
+
+    | /* epsilon */ {
+        output::printProductionRule(2);
+        $$ = new Funcs(yylineno);
+    }
+
+FuncDecl:   RetType ID LPAREN Formals RPAREN
+            { $$ = proc.handleFuncDecl((Type*)$1, (Identifier*)$2, (FormalsList*)$4); }
+            LBRACE Statements RBRACE 
+            { proc.closeLastScope((Function *)$6); }
+
+Enums: EnumDecl Enums {
+        $$ = proc.addEnumDecl($1, $2);
+    }
+
+    | /* epsilon */ {
+        $$ = proc.generateEmptyEnumsList();
+    }
+
+EnumDecl: ENUM ID LBRACE EnumeratorList RBRACE SC {
+        $$ = proc.generateEnumDecl($2, $4);
+    }
+
+RetType: Type {
+        output::printProductionRule(8);
+        $$ = $1; // no more logic to apply, RetType is (Type *)
+    }
+
+    | VOID {
+        $$ = proc.generateVoidType();
+    }
+
+Formals: /* epsilon */ {
+        $$ = new FormalsList({}, yylineno); // generate empty formalsList object
+    }
+
+    | FormalsList {
+        output::printProductionRule(11);
+        $$ = $1; // no need for further processing
+    }
+
+FormalsList: FormalDecl {
+        $$ = proc.generateSingleValueFormalDecl($1);
+    }
+
+    | FormalDecl COMMA FormalsList %prec FORMALLIST {
+        $$ = proc.addFormals($1, $3);
+    }
+
+FormalDecl: Type ID {
+        $$ = proc.generatePrimitiveFormalDecl($1, $2);
+    }
+
+    | EnumType ID {
+        $$ = proc.generateEnumFormalDecl($1, $2);
+    }
+
+EnumeratorList: Enumerator {
+        $$ = proc.generateSingleEnumValueList($1);
+    }
+
+    | EnumeratorList COMMA Enumerator %prec ENUMLIST {
+        $$ = proc.addEnumValues($1, $3);
+    }
+
+Enumerator: ID {
+        $$ = proc.getEnumValueIdentifier($1);
+    }
+
+Statements: Statement {
+        $$ = proc.generateSingleValueStatementList($1);
+    }
+
+    | Statements Statement {
+        $$ = proc.addStatements($1, $2);
+    }
+
+AnyIf: IF LPAREN Exp {
+        if (!proc.isBool((Exp*)$3)) {
+            output::errorMismatch(yylineno);
+            exit(1);
+        }
+    } RPAREN {
+        // Create M marker and backpatch truelist of expression to it.  
+      
+        $$ = (AnyIfNode*)proc.handleAnyIf((Nodes::Exp*)$3);
+        proc.symbolTable.openRegularScope();    
+    } Statement { proc.symbolTable.closeLastScope(); $$ = $6; }
+
+ElseRule: ELSE {
+    $$ = proc.handleElse();
+    proc.symbolTable.openRegularScope();
+    } Statement {
+        proc.symbolTable.closeLastScope();
+        $$ = $2;
+    }
+
+
+WhileRule: WHILE LPAREN M Exp {
+        if (!proc.isBool((Exp*)$4)) {
+            output::errorMismatch(yylineno);
+            exit(1);
+        }
+        proc.emitIfBoolId((Exp*) $4);
+    }
+    M RPAREN { proc.symbolTable.openWhileScope((Exp*)$4); while_counter+= 1; }
+    Statement N M {
+        proc.handleWhile((Marker*)$3, (Marker*)$6, (Marker*)$11, (Next*)$10, (Exp*)$4);
+        while_counter -= 1;
+        proc.symbolTable.closeLastScope();
+    }
+
+M: { $$ = proc.getMarker(); }
+N: { $$ = proc.getNext(); }
+
+Statement: LBRACE { proc.symbolTable.openRegularScope(); } Statements RBRACE {
+        $$ = proc.generateBlockStatement($3);
+        proc.symbolTable.closeLastScope();
+    }
+
+    | Type ID SC {
+        $$ = proc.generatePrimitiveDeclarationStatement($1, $2);
+    }
+
+    | EnumType ID SC {
+        $$ = proc.generateEnumVarDeclStatement($1, $2);
+    }
+
+    | EnumDecl {
+        $$ = proc.generateEnumDeclStatement($1);
+    }
+
+    | Type ID { $$ = proc.defineAndAllocateVariable($1, $2); } ASSIGN Exp SC {
+        $$ = proc.generatePrimitiveAssignmentStatement($3, $5);
+    }
+
+    | EnumType ID ASSIGN Exp SC {
+        $$ = proc.generateEnumAssignmentStatement($1, $2, $4);
+    }
+
+    | ID { $$ = proc.allocateVariable($1); } ASSIGN Exp SC {
+        $$ = proc.generateAssignmentStatement($2, $4);
+    }
+
+    | Call SC {
+        // This is an Exp.
+        $$ = proc.generateCallStatement($1);
+    }
+
+    | RETURN SC {
+        $$ = proc.generateVoidReturnStatement();
+    }
+
+    | RETURN Exp SC {
+        $$ = proc.generateReturnStatement($2);
+    }
+
+    | AnyIf {
+        /* if we are here - it cannot be an If Else! we backpatch false list to here */
+        output::printProductionRule(31);
+        proc.afterJustIf((Nodes::AnyIfNode*)$1);
+    } %prec IF
+
+    | AnyIf ElseRule  {
+        output::printProductionRule(32);
+        proc.afterIfElse((Nodes::AnyIfNode*)$1, (Nodes::ElseRuleNode*)$2);
+        } %prec ELSE
+
+    | WhileRule { output::printProductionRule(33); }
+
+    | BREAK SC { output::printProductionRule(34);
+                    if (while_counter == 0) {
+                        output::errorUnexpectedBreak(yylineno);
+                        exit(34);
+                    }
+                    proc.handleBreak();
+               }
+
+    | CONTINUE SC { output::printProductionRule(35);
+                    if (while_counter == 0) {
+                        output::errorUnexpectedContinue(yylineno);
+                        exit(35);
+                    }
+                    proc.handleContinue();
+               }
+
+Call: ID LPAREN ExpList RPAREN {
+        $$ = proc.createCall($1, $3);
+    }
+
+    | ID LPAREN RPAREN {
+        $$ = proc.createEmptyCallExpression($1);
+    }
+
+ExpList: Exp {
+        $$ = proc.generateSingleValueExpList($1);
+    }
+
+    | Exp COMMA { $$ = proc.getRegisterForExp($1); } ExpList {
+        $$ = proc.addToExpList($3, $4);
+    }
+
+Type: INT { $$ = proc.generateIntType(); }
+    | BYTE { $$ = proc.generateByteType(); }
+    | BOOL { $$ = proc.generateBoolType(); }
+
+EnumType: ENUM ID {
+        $$ = proc.generateEnumType($2);
+    }
+
+Exp: LPAREN Exp RPAREN {
+        output::printProductionRule(44);
+        $$ = $2;
+    }
+
+    | Exp MULOP Exp {
+        $$ = proc.generateArithmeticExp($1, $3, "*");
+    }
+
+    | Exp DIVOP Exp {
+        $$ = proc.generateArithmeticExp($1, $3, "/");
+    }
+
+    | Exp PLUSOP Exp {
+        $$ = proc.generateArithmeticExp($1, $3, "+");
+    }
+
+    | Exp MINUSOP Exp {
+        $$ = proc.generateArithmeticExp($1, $3, "-");
+    }
+
+    | ID {
+        $$ = proc.generateIdentifierExpression($1);
+    }
+
+    | Call {
+        output::printProductionRule(47);
+        $$ = proc.generateCallExpression($1); // generate IR code, set "place" property
+    }
+    
+    | NUM {
+        output::printProductionRule(48);
+        $$ = $1;
+    }
+
+    | NUM B {
+        $$ = proc.generateByteExp($1);
+    }
+
+    | STRING {
+        output::printProductionRule(50);
+        $$ = $1;
+    }
+
+    | TRUE {
+        output::printProductionRule(51);
+        $$ = proc.setTrue($1);
+    }
+
+    | FALSE {
+        output::printProductionRule(52);
+        $$ = proc.setFalse($1);
+    }
+
+    | NOT Exp {
+        $$ = proc.generateNotExpression($2);
+    } %prec NOT
+
+    | Exp AND {
+            proc.andShortCircuit($1);
+        } Exp {
+        $$ = proc.generateAndExpression($1, $4);
+    }
+
+    | Exp OR {
+            proc.orShortCircuit($1);
+        } Exp {
+        $$ = proc.generateOrExpression($1, $4);
+    }
+    
+    | Exp RELOP Exp {
+        $$ = proc.generateRelOpExpression($1, $2, $3);
+    }
+
+    | Exp EQOP Exp {
+        $$ = proc.generateEqOpExpression($1, $2, $3);
+    }
+
+    | LPAREN Type RPAREN Exp {
+        $$ = proc.generateCastExpression($2, $4);
+    }
+
+%%
+
+int main()
+{
+    auto res = yyparse();
+    CodeBuffer::instance().printCodeBuffer();
+    CodeBuffer::instance().printGlobalBuffer();
+    return res;
+}
+
+int yyerror(char const* message){
+    extern int yylineno;
+    output::errorSyn(yylineno);
+    exit(1);
+}
